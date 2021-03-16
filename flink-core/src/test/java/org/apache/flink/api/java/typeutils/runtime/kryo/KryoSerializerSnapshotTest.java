@@ -30,138 +30,132 @@ import org.apache.flink.api.java.typeutils.runtime.kryo.KryoPojosForMigrationTes
 import org.apache.flink.core.memory.DataInputDeserializer;
 import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataOutputSerializer;
-import org.apache.flink.core.testutils.CommonTestUtils;
+import org.apache.flink.testutils.ClassLoaderUtils;
 
 import org.junit.Before;
 import org.junit.Test;
 
 import java.io.IOException;
-import java.net.URL;
-import java.net.URLClassLoader;
+import java.io.Serializable;
 
 import static org.apache.flink.api.common.typeutils.TypeSerializerMatchers.isCompatibleAsIs;
 import static org.apache.flink.api.common.typeutils.TypeSerializerMatchers.isCompatibleWithReconfiguredSerializer;
 import static org.apache.flink.api.common.typeutils.TypeSerializerMatchers.isIncompatible;
 import static org.hamcrest.MatcherAssert.assertThat;
 
-/**
- * Tests for {@link KryoSerializerSnapshot}.
- */
+/** Tests for {@link KryoSerializerSnapshot}. */
 public class KryoSerializerSnapshotTest {
 
-	private ExecutionConfig oldConfig;
-	private ExecutionConfig newConfig;
+    private ExecutionConfig oldConfig;
+    private ExecutionConfig newConfig;
 
-	@Before
-	public void setup() {
-		oldConfig = new ExecutionConfig();
-		newConfig = new ExecutionConfig();
-	}
+    @Before
+    public void setup() {
+        oldConfig = new ExecutionConfig();
+        newConfig = new ExecutionConfig();
+    }
 
-	@Test
-	public void sanityTest() {
-		assertThat(resolveKryoCompatibility(oldConfig, newConfig), isCompatibleAsIs());
-	}
+    @Test
+    public void sanityTest() {
+        assertThat(resolveKryoCompatibility(oldConfig, newConfig), isCompatibleAsIs());
+    }
 
-	@Test
-	public void addingTypesIsCompatibleAfterReconfiguration() {
-		oldConfig.registerKryoType(Animal.class);
+    @Test
+    public void addingTypesIsCompatibleAfterReconfiguration() {
+        oldConfig.registerKryoType(Animal.class);
 
-		newConfig.registerKryoType(Animal.class);
-		newConfig.registerTypeWithKryoSerializer(Dog.class, DogKryoSerializer.class);
+        newConfig.registerKryoType(Animal.class);
+        newConfig.registerTypeWithKryoSerializer(Dog.class, DogKryoSerializer.class);
 
-		assertThat(resolveKryoCompatibility(oldConfig, newConfig),
-			isCompatibleWithReconfiguredSerializer());
-	}
+        assertThat(
+                resolveKryoCompatibility(oldConfig, newConfig),
+                isCompatibleWithReconfiguredSerializer());
+    }
 
-	@Test
-	public void replacingKryoSerializersIsCompatibleAsIs() {
-		oldConfig.registerKryoType(Animal.class);
-		oldConfig.registerTypeWithKryoSerializer(Dog.class, DogKryoSerializer.class);
+    @Test
+    public void replacingKryoSerializersIsCompatibleAsIs() {
+        oldConfig.registerKryoType(Animal.class);
+        oldConfig.registerTypeWithKryoSerializer(Dog.class, DogKryoSerializer.class);
 
-		newConfig.registerKryoType(Animal.class);
-		newConfig.registerTypeWithKryoSerializer(Dog.class, DogV2KryoSerializer.class);
+        newConfig.registerKryoType(Animal.class);
+        newConfig.registerTypeWithKryoSerializer(Dog.class, DogV2KryoSerializer.class);
 
-		// it is compatible as is, since Kryo does not expose compatibility API with KryoSerializers
-		// so we can not know if DogKryoSerializer is compatible with DogV2KryoSerializer
-		assertThat(resolveKryoCompatibility(oldConfig, newConfig),
-			isCompatibleAsIs());
-	}
+        // it is compatible as is, since Kryo does not expose compatibility API with KryoSerializers
+        // so we can not know if DogKryoSerializer is compatible with DogV2KryoSerializer
+        assertThat(resolveKryoCompatibility(oldConfig, newConfig), isCompatibleAsIs());
+    }
 
-	@Test
-	public void reorderingIsCompatibleAfterReconfiguration() {
-		oldConfig.registerKryoType(Parrot.class);
-		oldConfig.registerKryoType(Dog.class);
+    @Test
+    public void reorderingIsCompatibleAfterReconfiguration() {
+        oldConfig.registerKryoType(Parrot.class);
+        oldConfig.registerKryoType(Dog.class);
 
-		newConfig.registerKryoType(Dog.class);
-		newConfig.registerKryoType(Parrot.class);
+        newConfig.registerKryoType(Dog.class);
+        newConfig.registerKryoType(Parrot.class);
 
-		assertThat(resolveKryoCompatibility(oldConfig, newConfig),
-			isCompatibleWithReconfiguredSerializer());
-	}
+        assertThat(
+                resolveKryoCompatibility(oldConfig, newConfig),
+                isCompatibleWithReconfiguredSerializer());
+    }
 
-	@Test
-	public void tryingToRestoreWithNonExistingClassShouldBeIncompatible() throws IOException {
-		TypeSerializerSnapshot<Animal> restoredSnapshot = kryoSnapshotWithMissingClass();
+    @Test
+    public void tryingToRestoreWithNonExistingClassShouldBeIncompatible() throws IOException {
+        TypeSerializerSnapshot<Animal> restoredSnapshot = kryoSnapshotWithMissingClass();
 
-		TypeSerializer<Animal> currentSerializer = new KryoSerializer<>(Animal.class, new ExecutionConfig());
+        TypeSerializer<Animal> currentSerializer =
+                new KryoSerializer<>(Animal.class, new ExecutionConfig());
 
-		assertThat(restoredSnapshot.resolveSchemaCompatibility(currentSerializer),
-			isIncompatible());
-	}
+        assertThat(
+                restoredSnapshot.resolveSchemaCompatibility(currentSerializer), isIncompatible());
+    }
 
-	// -------------------------------------------------------------------------------------------------------
-	// Helpers
-	// -------------------------------------------------------------------------------------------------------
+    // -------------------------------------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------------------------------------
 
-	private static TypeSerializerSnapshot<Animal> kryoSnapshotWithMissingClass() throws IOException {
-		DataInputView in = new DataInputDeserializer(unLoadableSnapshotBytes());
+    private static TypeSerializerSnapshot<Animal> kryoSnapshotWithMissingClass()
+            throws IOException {
+        DataInputView in = new DataInputDeserializer(unLoadableSnapshotBytes());
 
-		return TypeSerializerSnapshot.readVersionedSnapshot(
-			in,
-			KryoSerializerSnapshotTest.class.getClassLoader());
-	}
+        return TypeSerializerSnapshot.readVersionedSnapshot(
+                in, KryoSerializerSnapshotTest.class.getClassLoader());
+    }
 
-	/**
-	 * This method returns the bytes of a serialized {@link KryoSerializerSnapshot}, that contains a Kryo registration
-	 * of a class that does not exists in the current classpath.
-	 */
-	private static byte[] unLoadableSnapshotBytes() throws IOException {
-		final ClassLoader originalClassLoader = Thread.currentThread().getContextClassLoader();
+    /**
+     * This method returns the bytes of a serialized {@link KryoSerializerSnapshot}, that contains a
+     * Kryo registration of a class that does not exists in the current classpath.
+     */
+    private static byte[] unLoadableSnapshotBytes() throws IOException {
+        final ClassLoader originalClassLoader = Thread.currentThread().getContextClassLoader();
 
-		ClassLoader tempClassLoader =
-			new URLClassLoader(new URL[0], KryoSerializerSnapshotTest.class.getClassLoader());
-		try {
-			Thread.currentThread().setContextClassLoader(tempClassLoader);
+        final ClassLoaderUtils.ObjectAndClassLoader<Serializable> outsideClassLoading =
+                ClassLoaderUtils.createSerializableObjectFromNewClassLoader();
 
-			ExecutionConfig conf = registerClassThatIsNotInClassPath(tempClassLoader);
+        try {
+            Thread.currentThread().setContextClassLoader(outsideClassLoading.getClassLoader());
 
-			KryoSerializer<Animal> previousSerializer = new KryoSerializer<>(Animal.class, conf);
-			TypeSerializerSnapshot<Animal> previousSnapshot = previousSerializer.snapshotConfiguration();
+            ExecutionConfig conf = new ExecutionConfig();
+            conf.registerKryoType(outsideClassLoading.getObject().getClass());
 
-			DataOutputSerializer out = new DataOutputSerializer(4096);
-			TypeSerializerSnapshot.writeVersionedSnapshot(out, previousSnapshot);
-			return out.getCopyOfBuffer();
-		}
-		finally {
-			Thread.currentThread().setContextClassLoader(originalClassLoader);
-		}
-	}
+            KryoSerializer<Animal> previousSerializer = new KryoSerializer<>(Animal.class, conf);
+            TypeSerializerSnapshot<Animal> previousSnapshot =
+                    previousSerializer.snapshotConfiguration();
 
-	private static ExecutionConfig registerClassThatIsNotInClassPath(ClassLoader tempClassLoader) {
-		Object objectForClassNotInClassPath =
-			CommonTestUtils.createObjectForClassNotInClassPath(tempClassLoader);
+            DataOutputSerializer out = new DataOutputSerializer(4096);
+            TypeSerializerSnapshot.writeVersionedSnapshot(out, previousSnapshot);
+            return out.getCopyOfBuffer();
+        } finally {
+            Thread.currentThread().setContextClassLoader(originalClassLoader);
+        }
+    }
 
-		ExecutionConfig conf = new ExecutionConfig();
-		conf.registerKryoType(objectForClassNotInClassPath.getClass());
-		return conf;
-	}
+    private static TypeSerializerSchemaCompatibility<Animal> resolveKryoCompatibility(
+            ExecutionConfig previous, ExecutionConfig current) {
+        KryoSerializer<Animal> previousSerializer = new KryoSerializer<>(Animal.class, previous);
+        TypeSerializerSnapshot<Animal> previousSnapshot =
+                previousSerializer.snapshotConfiguration();
 
-	private static TypeSerializerSchemaCompatibility<Animal> resolveKryoCompatibility(ExecutionConfig previous, ExecutionConfig current) {
-		KryoSerializer<Animal> previousSerializer = new KryoSerializer<>(Animal.class, previous);
-		TypeSerializerSnapshot<Animal> previousSnapshot = previousSerializer.snapshotConfiguration();
-
-		TypeSerializer<Animal> currentSerializer = new KryoSerializer<>(Animal.class, current);
-		return previousSnapshot.resolveSchemaCompatibility(currentSerializer);
-	}
+        TypeSerializer<Animal> currentSerializer = new KryoSerializer<>(Animal.class, current);
+        return previousSnapshot.resolveSchemaCompatibility(currentSerializer);
+    }
 }

@@ -21,12 +21,11 @@ package org.apache.flink.runtime.resourcemanager;
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.runtime.clusterframework.ApplicationStatus;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
-import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.entrypoint.ClusterInformation;
 import org.apache.flink.runtime.heartbeat.HeartbeatServices;
 import org.apache.flink.runtime.highavailability.HighAvailabilityServices;
-import org.apache.flink.runtime.metrics.MetricRegistry;
-import org.apache.flink.runtime.metrics.groups.JobManagerMetricGroup;
+import org.apache.flink.runtime.io.network.partition.ResourceManagerPartitionTrackerFactory;
+import org.apache.flink.runtime.metrics.groups.ResourceManagerMetricGroup;
 import org.apache.flink.runtime.resourcemanager.exceptions.ResourceManagerException;
 import org.apache.flink.runtime.resourcemanager.slotmanager.SlotManager;
 import org.apache.flink.runtime.rpc.FatalErrorHandler;
@@ -35,8 +34,7 @@ import org.apache.flink.util.Preconditions;
 
 import javax.annotation.Nullable;
 
-import java.util.Collection;
-import java.util.Collections;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -47,69 +45,84 @@ import java.util.concurrent.TimeUnit;
  */
 public class StandaloneResourceManager extends ResourceManager<ResourceID> {
 
-	/** The duration of the startup period. A duration of zero means there is no startup period. */
-	private final Time startupPeriodTime;
+    /** The duration of the startup period. A duration of zero means there is no startup period. */
+    private final Time startupPeriodTime;
 
-	public StandaloneResourceManager(
-			RpcService rpcService,
-			String resourceManagerEndpointId,
-			ResourceID resourceId,
-			HighAvailabilityServices highAvailabilityServices,
-			HeartbeatServices heartbeatServices,
-			SlotManager slotManager,
-			MetricRegistry metricRegistry,
-			JobLeaderIdService jobLeaderIdService,
-			ClusterInformation clusterInformation,
-			FatalErrorHandler fatalErrorHandler,
-			JobManagerMetricGroup jobManagerMetricGroup,
-			Time startupPeriodTime) {
-		super(
-			rpcService,
-			resourceManagerEndpointId,
-			resourceId,
-			highAvailabilityServices,
-			heartbeatServices,
-			slotManager,
-			metricRegistry,
-			jobLeaderIdService,
-			clusterInformation,
-			fatalErrorHandler,
-			jobManagerMetricGroup);
-		this.startupPeriodTime = Preconditions.checkNotNull(startupPeriodTime);
-	}
+    public StandaloneResourceManager(
+            RpcService rpcService,
+            ResourceID resourceId,
+            HighAvailabilityServices highAvailabilityServices,
+            HeartbeatServices heartbeatServices,
+            SlotManager slotManager,
+            ResourceManagerPartitionTrackerFactory clusterPartitionTrackerFactory,
+            JobLeaderIdService jobLeaderIdService,
+            ClusterInformation clusterInformation,
+            FatalErrorHandler fatalErrorHandler,
+            ResourceManagerMetricGroup resourceManagerMetricGroup,
+            Time startupPeriodTime,
+            Time rpcTimeout,
+            Executor ioExecutor) {
+        super(
+                rpcService,
+                resourceId,
+                highAvailabilityServices,
+                heartbeatServices,
+                slotManager,
+                clusterPartitionTrackerFactory,
+                jobLeaderIdService,
+                clusterInformation,
+                fatalErrorHandler,
+                resourceManagerMetricGroup,
+                rpcTimeout,
+                ioExecutor);
+        this.startupPeriodTime = Preconditions.checkNotNull(startupPeriodTime);
+    }
 
-	@Override
-	protected void initialize() throws ResourceManagerException {
-		final long startupPeriodMillis = startupPeriodTime.toMilliseconds();
+    @Override
+    protected void initialize() throws ResourceManagerException {
+        // nothing to initialize
+    }
 
-		if (startupPeriodMillis > 0) {
-			getRpcService().getScheduledExecutor().schedule(
-				() -> getMainThreadExecutor().execute(
-					() -> setFailUnfulfillableRequest(true)),
-				startupPeriodMillis,
-				TimeUnit.MILLISECONDS
-			);
-		}
-	}
+    @Override
+    protected void terminate() {
+        // noop
+    }
 
-	@Override
-	protected void internalDeregisterApplication(ApplicationStatus finalStatus, @Nullable String diagnostics) {
-	}
+    @Override
+    protected void internalDeregisterApplication(
+            ApplicationStatus finalStatus, @Nullable String diagnostics) {}
 
-	@Override
-	public Collection<ResourceProfile> startNewWorker(ResourceProfile resourceProfile) {
-		return Collections.emptyList();
-	}
+    @Override
+    public boolean startNewWorker(WorkerResourceSpec workerResourceSpec) {
+        return false;
+    }
 
-	@Override
-	public boolean stopWorker(ResourceID resourceID) {
-		// standalone resource manager cannot stop workers
-		return false;
-	}
+    @Override
+    public boolean stopWorker(ResourceID resourceID) {
+        // standalone resource manager cannot stop workers
+        return false;
+    }
 
-	@Override
-	protected ResourceID workerStarted(ResourceID resourceID) {
-		return resourceID;
-	}
+    @Override
+    protected ResourceID workerStarted(ResourceID resourceID) {
+        return resourceID;
+    }
 
+    @Override
+    protected void onLeadership() {
+        startStartupPeriod();
+    }
+
+    private void startStartupPeriod() {
+        setFailUnfulfillableRequest(false);
+
+        final long startupPeriodMillis = startupPeriodTime.toMilliseconds();
+
+        if (startupPeriodMillis > 0) {
+            scheduleRunAsync(
+                    () -> setFailUnfulfillableRequest(true),
+                    startupPeriodMillis,
+                    TimeUnit.MILLISECONDS);
+        }
+    }
 }

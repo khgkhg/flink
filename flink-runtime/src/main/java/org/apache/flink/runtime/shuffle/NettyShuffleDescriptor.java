@@ -25,113 +25,95 @@ import org.apache.flink.runtime.io.network.partition.ResultPartitionID;
 
 import java.io.Serializable;
 import java.net.InetSocketAddress;
-import java.util.EnumSet;
 import java.util.Optional;
 
-/**
- * Default implementation of {@link ShuffleDescriptor} for {@link NettyShuffleMaster}.
- */
+/** Default implementation of {@link ShuffleDescriptor} for {@link NettyShuffleMaster}. */
 public class NettyShuffleDescriptor implements ShuffleDescriptor {
 
-	private static final long serialVersionUID = 852181945034989215L;
+    private static final long serialVersionUID = 852181945034989215L;
 
-	private static final EnumSet<ReleaseType> SUPPORTED_RELEASE_TYPES_FOR_BLOCKING_PARTITIONS =
-		EnumSet.of(ReleaseType.AUTO, ReleaseType.MANUAL);
+    private final ResourceID producerLocation;
 
-	private static final EnumSet<ReleaseType> SUPPORTED_RELEASE_TYPES_FOR_NON_BLOCKING_PARTITIONS =
-		EnumSet.of(ReleaseType.AUTO);
+    private final PartitionConnectionInfo partitionConnectionInfo;
 
-	private final ResourceID producerLocation;
+    private final ResultPartitionID resultPartitionID;
 
-	private final PartitionConnectionInfo partitionConnectionInfo;
+    public NettyShuffleDescriptor(
+            ResourceID producerLocation,
+            PartitionConnectionInfo partitionConnectionInfo,
+            ResultPartitionID resultPartitionID) {
+        this.producerLocation = producerLocation;
+        this.partitionConnectionInfo = partitionConnectionInfo;
+        this.resultPartitionID = resultPartitionID;
+    }
 
-	private final ResultPartitionID resultPartitionID;
+    public ConnectionID getConnectionId() {
+        return partitionConnectionInfo.getConnectionId();
+    }
 
-	private final boolean isBlocking;
+    @Override
+    public ResultPartitionID getResultPartitionID() {
+        return resultPartitionID;
+    }
 
-	public NettyShuffleDescriptor(
-			ResourceID producerLocation,
-			PartitionConnectionInfo partitionConnectionInfo,
-			ResultPartitionID resultPartitionID,
-			boolean isBlocking) {
-		this.producerLocation = producerLocation;
-		this.partitionConnectionInfo = partitionConnectionInfo;
-		this.resultPartitionID = resultPartitionID;
-		this.isBlocking = isBlocking;
-	}
+    @Override
+    public Optional<ResourceID> storesLocalResourcesOn() {
+        return Optional.of(producerLocation);
+    }
 
-	public ConnectionID getConnectionId() {
-		return partitionConnectionInfo.getConnectionId();
-	}
+    public boolean isLocalTo(ResourceID consumerLocation) {
+        return producerLocation.equals(consumerLocation);
+    }
 
-	@Override
-	public ResultPartitionID getResultPartitionID() {
-		return resultPartitionID;
-	}
+    /** Information for connection to partition producer for shuffle exchange. */
+    @FunctionalInterface
+    public interface PartitionConnectionInfo extends Serializable {
+        ConnectionID getConnectionId();
+    }
 
-	@Override
-	public Optional<ResourceID> storesLocalResourcesOn() {
-		return Optional.of(producerLocation);
-	}
+    /**
+     * Remote partition connection information with index to query partition.
+     *
+     * <p>Normal connection information with network address and port for connection in case of
+     * distributed execution.
+     */
+    public static class NetworkPartitionConnectionInfo implements PartitionConnectionInfo {
 
-	@Override
-	public EnumSet<ReleaseType> getSupportedReleaseTypes() {
-		return isBlocking ?
-			SUPPORTED_RELEASE_TYPES_FOR_BLOCKING_PARTITIONS : SUPPORTED_RELEASE_TYPES_FOR_NON_BLOCKING_PARTITIONS;
-	}
+        private static final long serialVersionUID = 5992534320110743746L;
 
-	public boolean isLocalTo(ResourceID consumerLocation) {
-		return producerLocation.equals(consumerLocation);
-	}
+        private final ConnectionID connectionID;
 
-	/**
-	 * Information for connection to partition producer for shuffle exchange.
-	 */
-	public interface PartitionConnectionInfo extends Serializable {
-		ConnectionID getConnectionId();
-	}
+        @VisibleForTesting
+        public NetworkPartitionConnectionInfo(ConnectionID connectionID) {
+            this.connectionID = connectionID;
+        }
 
-	/**
-	 * Remote partition connection information with index to query partition.
-	 *
-	 * <p>Normal connection information with network address and port for connection in case of distributed execution.
-	 */
-	public static class NetworkPartitionConnectionInfo implements PartitionConnectionInfo {
+        @Override
+        public ConnectionID getConnectionId() {
+            return connectionID;
+        }
 
-		private static final long serialVersionUID = 5992534320110743746L;
+        static NetworkPartitionConnectionInfo fromProducerDescriptor(
+                ProducerDescriptor producerDescriptor, int connectionIndex) {
+            InetSocketAddress address =
+                    new InetSocketAddress(
+                            producerDescriptor.getAddress(), producerDescriptor.getDataPort());
+            return new NetworkPartitionConnectionInfo(new ConnectionID(address, connectionIndex));
+        }
+    }
 
-		private final ConnectionID connectionID;
+    /**
+     * Local partition connection information.
+     *
+     * <p>Does not have any network connection information in case of local execution.
+     */
+    public enum LocalExecutionPartitionConnectionInfo implements PartitionConnectionInfo {
+        INSTANCE;
 
-		@VisibleForTesting
-		public NetworkPartitionConnectionInfo(ConnectionID connectionID) {
-			this.connectionID = connectionID;
-		}
-
-		@Override
-		public ConnectionID getConnectionId() {
-			return connectionID;
-		}
-
-		static NetworkPartitionConnectionInfo fromProducerDescriptor(
-				ProducerDescriptor producerDescriptor,
-				int connectionIndex) {
-			InetSocketAddress address =
-				new InetSocketAddress(producerDescriptor.getAddress(), producerDescriptor.getDataPort());
-			return new NetworkPartitionConnectionInfo(new ConnectionID(address, connectionIndex));
-		}
-	}
-
-	/**
-	 * Local partition connection information.
-	 *
-	 * <p>Does not have any network connection information in case of local execution.
-	 */
-	public enum LocalExecutionPartitionConnectionInfo implements PartitionConnectionInfo {
-		INSTANCE;
-
-		@Override
-		public ConnectionID getConnectionId() {
-			throw new UnsupportedOperationException("Local execution does not support shuffle connection.");
-		}
-	}
+        @Override
+        public ConnectionID getConnectionId() {
+            throw new UnsupportedOperationException(
+                    "Local execution does not support shuffle connection.");
+        }
+    }
 }

@@ -20,151 +20,103 @@ package org.apache.flink.streaming.runtime.io;
 
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.runtime.event.AbstractEvent;
+import org.apache.flink.runtime.checkpoint.CheckpointException;
+import org.apache.flink.runtime.checkpoint.CheckpointFailureReason;
+import org.apache.flink.runtime.checkpoint.channel.ChannelStateWriter;
+import org.apache.flink.runtime.checkpoint.channel.InputChannelInfo;
 import org.apache.flink.runtime.io.disk.iomanager.IOManager;
-import org.apache.flink.runtime.io.network.api.EndOfPartitionEvent;
-import org.apache.flink.runtime.io.network.api.serialization.RecordDeserializer;
-import org.apache.flink.runtime.io.network.api.serialization.RecordDeserializer.DeserializationResult;
 import org.apache.flink.runtime.io.network.api.serialization.SpillingAdaptiveSpanningRecordDeserializer;
-import org.apache.flink.runtime.io.network.buffer.Buffer;
-import org.apache.flink.runtime.io.network.partition.consumer.BufferOrEvent;
 import org.apache.flink.runtime.plugable.DeserializationDelegate;
-import org.apache.flink.runtime.plugable.NonReusingDeserializationDelegate;
+import org.apache.flink.streaming.api.watermark.Watermark;
+import org.apache.flink.streaming.runtime.io.checkpointing.CheckpointedInputGate;
 import org.apache.flink.streaming.runtime.streamrecord.StreamElement;
-import org.apache.flink.streaming.runtime.streamrecord.StreamElementSerializer;
-
-import javax.annotation.Nullable;
+import org.apache.flink.streaming.runtime.streamstatus.StatusWatermarkValve;
+import org.apache.flink.streaming.runtime.streamstatus.StreamStatus;
 
 import java.io.IOException;
-import java.util.Optional;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
-import static org.apache.flink.util.Preconditions.checkState;
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.toMap;
 
 /**
- * Implementation of {@link StreamTaskInput} that wraps an input from network taken from {@link CheckpointedInputGate}.
+ * Implementation of {@link StreamTaskInput} that wraps an input from network taken from {@link
+ * CheckpointedInputGate}.
+ *
+ * <p>This internally uses a {@link StatusWatermarkValve} to keep track of {@link Watermark} and
+ * {@link StreamStatus} events, and forwards them to event subscribers once the {@link
+ * StatusWatermarkValve} determines the {@link Watermark} from all inputs has advanced, or that a
+ * {@link StreamStatus} needs to be propagated downstream to denote a status change.
+ *
+ * <p>Forwarding elements, watermarks, or status elements must be protected by synchronizing on the
+ * given lock object. This ensures that we don't call methods on a {@link StreamInputProcessor}
+ * concurrently with the timer callback or other things.
  */
 @Internal
-public final class StreamTaskNetworkInput implements StreamTaskInput {
+public final class StreamTaskNetworkInput<T>
+        extends AbstractStreamTaskNetworkInput<
+                T,
+                SpillingAdaptiveSpanningRecordDeserializer<
+                        DeserializationDelegate<StreamElement>>> {
 
-	private final CheckpointedInputGate checkpointedInputGate;
+    public StreamTaskNetworkInput(
+            CheckpointedInputGate checkpointedInputGate,
+            TypeSerializer<T> inputSerializer,
+            IOManager ioManager,
+            StatusWatermarkValve statusWatermarkValve,
+            int inputIndex) {
+        super(
+                checkpointedInputGate,
+                inputSerializer,
+                statusWatermarkValve,
+                inputIndex,
+                getRecordDeserializers(checkpointedInputGate, ioManager));
+    }
 
-	private final DeserializationDelegate<StreamElement> deserializationDelegate;
+    // Initialize one deserializer per input channel
+    private static Map<
+                    InputChannelInfo,
+                    SpillingAdaptiveSpanningRecordDeserializer<
+                            DeserializationDelegate<StreamElement>>>
+            getRecordDeserializers(
+                    CheckpointedInputGate checkpointedInputGate, IOManager ioManager) {
+        return checkpointedInputGate.getChannelInfos().stream()
+                .collect(
+                        toMap(
+                                identity(),
+                                unused ->
+                                        new SpillingAdaptiveSpanningRecordDeserializer<>(
+                                                ioManager.getSpillingDirectoriesPaths())));
+    }
 
-	private final RecordDeserializer<DeserializationDelegate<StreamElement>>[] recordDeserializers;
+    @Override
+    public CompletableFuture<Void> prepareSnapshot(
+            ChannelStateWriter channelStateWriter, long checkpointId) throws CheckpointException {
+        for (Map.Entry<
+                        InputChannelInfo,
+                        SpillingAdaptiveSpanningRecordDeserializer<
+                                DeserializationDelegate<StreamElement>>>
+                e : recordDeserializers.entrySet()) {
 
-	private final int inputIndex;
+            try {
+                channelStateWriter.addInputData(
+                        checkpointId,
+                        e.getKey(),
+                        ChannelStateWriter.SEQUENCE_NUMBER_UNKNOWN,
+                        e.getValue().getUnconsumedBuffer());
+            } catch (IOException ioException) {
+                throw new CheckpointException(CheckpointFailureReason.EXCEPTION, ioException);
+            }
+        }
+        return checkpointedInputGate.getAllBarriersReceivedFuture(checkpointId);
+    }
 
-	private int lastChannel = UNSPECIFIED;
+    @Override
+    public void close() throws IOException {
+        super.close();
 
-	private RecordDeserializer<DeserializationDelegate<StreamElement>> currentRecordDeserializer = null;
-
-	private boolean isFinished = false;
-
-	@SuppressWarnings("unchecked")
-	public StreamTaskNetworkInput(
-			CheckpointedInputGate checkpointedInputGate,
-			TypeSerializer<?> inputSerializer,
-			IOManager ioManager,
-			int inputIndex) {
-		this.checkpointedInputGate = checkpointedInputGate;
-		this.deserializationDelegate = new NonReusingDeserializationDelegate<>(
-			new StreamElementSerializer<>(inputSerializer));
-
-		// Initialize one deserializer per input channel
-		this.recordDeserializers = new SpillingAdaptiveSpanningRecordDeserializer[checkpointedInputGate.getNumberOfInputChannels()];
-		for (int i = 0; i < recordDeserializers.length; i++) {
-			recordDeserializers[i] = new SpillingAdaptiveSpanningRecordDeserializer<>(
-				ioManager.getSpillingDirectoriesPaths());
-		}
-
-		this.inputIndex = inputIndex;
-	}
-
-	@Override
-	@Nullable
-	public StreamElement pollNextNullable() throws Exception {
-
-		while (true) {
-			// get the stream element from the deserializer
-			if (currentRecordDeserializer != null) {
-				DeserializationResult result = currentRecordDeserializer.getNextRecord(deserializationDelegate);
-				if (result.isBufferConsumed()) {
-					currentRecordDeserializer.getCurrentBuffer().recycleBuffer();
-					currentRecordDeserializer = null;
-				}
-
-				if (result.isFullRecord()) {
-					return deserializationDelegate.getInstance();
-				}
-			}
-
-			Optional<BufferOrEvent> bufferOrEvent = checkpointedInputGate.pollNext();
-			if (bufferOrEvent.isPresent()) {
-				processBufferOrEvent(bufferOrEvent.get());
-			} else {
-				if (checkpointedInputGate.isFinished()) {
-					isFinished = true;
-					checkState(checkpointedInputGate.isAvailable().isDone(), "Finished BarrierHandler should be available");
-					if (!checkpointedInputGate.isEmpty()) {
-						throw new IllegalStateException("Trailing data in checkpoint barrier handler.");
-					}
-				}
-				return null;
-			}
-		}
-	}
-
-	private void processBufferOrEvent(BufferOrEvent bufferOrEvent) throws IOException {
-		if (bufferOrEvent.isBuffer()) {
-			lastChannel = bufferOrEvent.getChannelIndex();
-			currentRecordDeserializer = recordDeserializers[lastChannel];
-			currentRecordDeserializer.setNextBuffer(bufferOrEvent.getBuffer());
-		}
-		else {
-			// Event received
-			final AbstractEvent event = bufferOrEvent.getEvent();
-			// TODO: with checkpointedInputGate.isFinished() we might not need to support any events on this level.
-			if (event.getClass() != EndOfPartitionEvent.class) {
-				throw new IOException("Unexpected event: " + event);
-			}
-		}
-	}
-
-	@Override
-	public int getLastChannel() {
-		return lastChannel;
-	}
-
-	@Override
-	public int getInputIndex() {
-		return inputIndex;
-	}
-
-	@Override
-	public boolean isFinished() {
-		return isFinished;
-	}
-
-	@Override
-	public CompletableFuture<?> isAvailable() {
-		if (currentRecordDeserializer != null) {
-			return AVAILABLE;
-		}
-		return checkpointedInputGate.isAvailable();
-	}
-
-	@Override
-	public void close() throws IOException {
-		// clear the buffers. this part should not ever fail
-		for (RecordDeserializer<?> deserializer : recordDeserializers) {
-			Buffer buffer = deserializer.getCurrentBuffer();
-			if (buffer != null && !buffer.isRecycled()) {
-				buffer.recycleBuffer();
-			}
-			deserializer.clear();
-		}
-
-		checkpointedInputGate.cleanup();
-	}
+        // cleanup the resources of the checkpointed input gate
+        checkpointedInputGate.close();
+    }
 }

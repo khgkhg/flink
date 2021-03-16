@@ -19,11 +19,8 @@
 package org.apache.flink.runtime.jobmaster;
 
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
-import org.apache.flink.runtime.executiongraph.utils.SimpleAckingTaskManagerGateway;
-import org.apache.flink.runtime.instance.SlotSharingGroupId;
 import org.apache.flink.runtime.jobmanager.scheduler.Locality;
 import org.apache.flink.runtime.jobmanager.slots.TaskManagerGateway;
-import org.apache.flink.runtime.taskmanager.LocalTaskManagerLocation;
 import org.apache.flink.runtime.taskmanager.TaskManagerLocation;
 import org.apache.flink.util.Preconditions;
 
@@ -32,156 +29,105 @@ import javax.annotation.Nullable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
 
-/**
- * Simple logical slot for testing purposes.
- */
+/** Simple logical slot for testing purposes. */
 public class TestingLogicalSlot implements LogicalSlot {
 
-	private final TaskManagerLocation taskManagerLocation;
+    private final TaskManagerLocation taskManagerLocation;
 
-	private final TaskManagerGateway taskManagerGateway;
+    private final TaskManagerGateway taskManagerGateway;
 
-	private final AtomicReference<Payload> payloadReference;
+    private final AtomicReference<Payload> payloadReference;
 
-	private final int slotNumber;
+    private final CompletableFuture<?> releaseFuture;
 
-	private final CompletableFuture<?> releaseFuture;
+    private final boolean automaticallyCompleteReleaseFuture;
 
-	@Nullable
-	private final CompletableFuture<?> customReleaseFuture;
+    private final SlotOwner slotOwner;
 
-	@Nullable
-	private final SlotOwner slotOwner;
+    private final AllocationID allocationId;
 
-	private final AllocationID allocationId;
+    private final SlotRequestId slotRequestId;
 
-	private final SlotRequestId slotRequestId;
+    private boolean released;
 
-	private final SlotSharingGroupId slotSharingGroupId;
+    TestingLogicalSlot(
+            TaskManagerLocation taskManagerLocation,
+            TaskManagerGateway taskManagerGateway,
+            AllocationID allocationId,
+            SlotRequestId slotRequestId,
+            boolean automaticallyCompleteReleaseFuture,
+            SlotOwner slotOwner) {
 
-	public TestingLogicalSlot() {
-		this(new SimpleAckingTaskManagerGateway());
-	}
+        this.taskManagerLocation = Preconditions.checkNotNull(taskManagerLocation);
+        this.taskManagerGateway = Preconditions.checkNotNull(taskManagerGateway);
+        this.payloadReference = new AtomicReference<>();
+        this.allocationId = Preconditions.checkNotNull(allocationId);
+        this.slotRequestId = Preconditions.checkNotNull(slotRequestId);
+        this.releaseFuture = new CompletableFuture<>();
+        this.automaticallyCompleteReleaseFuture = automaticallyCompleteReleaseFuture;
+        this.slotOwner = Preconditions.checkNotNull(slotOwner);
+    }
 
-	public TestingLogicalSlot(TaskManagerGateway taskManagerGateway) {
-		this(
-			new LocalTaskManagerLocation(),
-			taskManagerGateway,
-			0,
-			new AllocationID(),
-			new SlotRequestId(),
-			new SlotSharingGroupId(),
-			null);
-	}
+    @Override
+    public TaskManagerLocation getTaskManagerLocation() {
+        return taskManagerLocation;
+    }
 
-	public TestingLogicalSlot(
-			TaskManagerLocation taskManagerLocation,
-			TaskManagerGateway taskManagerGateway,
-			int slotNumber,
-			AllocationID allocationId,
-			SlotRequestId slotRequestId,
-			SlotSharingGroupId slotSharingGroupId,
-			@Nullable CompletableFuture<?> customReleaseFuture) {
-		this(
-			taskManagerLocation,
-			taskManagerGateway,
-			slotNumber,
-			allocationId,
-			slotRequestId,
-			slotSharingGroupId,
-			customReleaseFuture,
-			null);
-	}
+    @Override
+    public TaskManagerGateway getTaskManagerGateway() {
+        return taskManagerGateway;
+    }
 
-	public TestingLogicalSlot(
-			TaskManagerLocation taskManagerLocation,
-			TaskManagerGateway taskManagerGateway,
-			int slotNumber,
-			AllocationID allocationId,
-			SlotRequestId slotRequestId,
-			SlotSharingGroupId slotSharingGroupId,
-			@Nullable CompletableFuture<?> customReleaseFuture,
-			@Nullable SlotOwner slotOwner) {
+    @Override
+    public Locality getLocality() {
+        return Locality.UNKNOWN;
+    }
 
-		this.taskManagerLocation = Preconditions.checkNotNull(taskManagerLocation);
-		this.taskManagerGateway = Preconditions.checkNotNull(taskManagerGateway);
-		this.payloadReference = new AtomicReference<>();
-		this.slotNumber = slotNumber;
-		this.allocationId = Preconditions.checkNotNull(allocationId);
-		this.slotRequestId = Preconditions.checkNotNull(slotRequestId);
-		this.slotSharingGroupId = Preconditions.checkNotNull(slotSharingGroupId);
-		this.releaseFuture = new CompletableFuture<>();
-		this.customReleaseFuture = customReleaseFuture;
-		this.slotOwner = slotOwner;
-	}
+    @Override
+    public boolean isAlive() {
+        return !releaseFuture.isDone();
+    }
 
-	@Override
-	public TaskManagerLocation getTaskManagerLocation() {
-		return taskManagerLocation;
-	}
+    @Override
+    public boolean tryAssignPayload(Payload payload) {
+        return payloadReference.compareAndSet(null, payload);
+    }
 
-	@Override
-	public TaskManagerGateway getTaskManagerGateway() {
-		return taskManagerGateway;
-	}
+    @Nullable
+    @Override
+    public Payload getPayload() {
+        return payloadReference.get();
+    }
 
-	@Override
-	public Locality getLocality() {
-		return Locality.UNKNOWN;
-	}
+    @Override
+    public CompletableFuture<?> releaseSlot(@Nullable Throwable cause) {
+        if (!released) {
+            released = true;
 
-	@Override
-	public boolean isAlive() {
-		if (customReleaseFuture != null) {
-			return !customReleaseFuture.isDone();
-		} else {
-			return !releaseFuture.isDone();
-		}
-	}
+            tryAssignPayload(TERMINATED_PAYLOAD);
+            payloadReference.get().fail(cause);
 
-	@Override
-	public boolean tryAssignPayload(Payload payload) {
-		return payloadReference.compareAndSet(null, payload);
-	}
+            slotOwner.returnLogicalSlot(this);
 
-	@Nullable
-	@Override
-	public Payload getPayload() {
-		return payloadReference.get();
-	}
+            if (automaticallyCompleteReleaseFuture) {
+                releaseFuture.complete(null);
+            }
+        }
 
-	@Override
-	public CompletableFuture<?> releaseSlot(@Nullable Throwable cause) {
-		if (slotOwner != null) {
-			slotOwner.returnLogicalSlot(this);
-		}
+        return releaseFuture;
+    }
 
-		if (customReleaseFuture != null) {
-			return customReleaseFuture;
-		} else {
-			releaseFuture.complete(null);
-			return releaseFuture;
-		}
-	}
+    @Override
+    public AllocationID getAllocationId() {
+        return allocationId;
+    }
 
-	@Override
-	public int getPhysicalSlotNumber() {
-		return slotNumber;
-	}
+    @Override
+    public SlotRequestId getSlotRequestId() {
+        return slotRequestId;
+    }
 
-	@Override
-	public AllocationID getAllocationId() {
-		return allocationId;
-	}
-
-	@Override
-	public SlotRequestId getSlotRequestId() {
-		return slotRequestId;
-	}
-
-	@Nullable
-	@Override
-	public SlotSharingGroupId getSlotSharingGroupId() {
-		return slotSharingGroupId;
-	}
+    public CompletableFuture<?> getReleaseFuture() {
+        return releaseFuture;
+    }
 }

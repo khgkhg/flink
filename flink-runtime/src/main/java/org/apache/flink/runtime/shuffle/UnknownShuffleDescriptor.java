@@ -21,45 +21,38 @@ package org.apache.flink.runtime.shuffle;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionID;
 
-import java.util.EnumSet;
 import java.util.Optional;
 
 /**
  * Unknown {@link ShuffleDescriptor} for which the producer has not been deployed yet.
  *
- <p>When a partition consumer is being scheduled, it can happen
- * that the producer of the partition (consumer input channel) has not been scheduled
- * and its location and other relevant data is yet to be defined.
- * To proceed with the consumer deployment, currently unknown input channels have to be
- * marked with placeholders which are this special implementation of {@link ShuffleDescriptor}.
+ * <p>When a partition consumer is being scheduled, it can happen that the producer of the partition
+ * (consumer input channel) has not been scheduled and its location and other relevant data is yet
+ * to be defined. To proceed with the consumer deployment, currently unknown input channels have to
+ * be marked with placeholders which are this special implementation of {@link ShuffleDescriptor}.
  */
 public final class UnknownShuffleDescriptor implements ShuffleDescriptor {
 
-	private static final long serialVersionUID = -4001330825983412431L;
+    private static final long serialVersionUID = -4001330825983412431L;
 
-	private final ResultPartitionID resultPartitionID;
+    private final ResultPartitionID resultPartitionID;
 
-	public UnknownShuffleDescriptor(ResultPartitionID resultPartitionID) {
-		this.resultPartitionID = resultPartitionID;
-	}
+    public UnknownShuffleDescriptor(ResultPartitionID resultPartitionID) {
+        this.resultPartitionID = resultPartitionID;
+    }
 
-	@Override
-	public ResultPartitionID getResultPartitionID() {
-		return resultPartitionID;
-	}
+    @Override
+    public ResultPartitionID getResultPartitionID() {
+        return resultPartitionID;
+    }
 
-	@Override
-	public boolean isUnknown() {
-		return true;
-	}
+    @Override
+    public boolean isUnknown() {
+        return true;
+    }
 
-	@Override
-	public Optional<ResourceID> storesLocalResourcesOn() {
-		return Optional.empty();
-	}
-
-	@Override
-	public EnumSet<ReleaseType> getSupportedReleaseTypes() {
-		return EnumSet.noneOf(ReleaseType.class);
-	}
+    @Override
+    public Optional<ResourceID> storesLocalResourcesOn() {
+        return Optional.empty();
+    }
 }

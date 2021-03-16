@@ -48,8 +48,8 @@ execution:
   type: streaming
   parallelism: 1
 
-deployment:
-  response-timeout: 5000
+configuration:
+  table.optimizer.join-reorder-enabled: true
 
 catalogs:
   - name: catalog2

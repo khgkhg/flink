@@ -20,13 +20,13 @@ package org.apache.flink.dropwizard.metrics;
 
 import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.dropwizard.ScheduledDropwizardReporter;
+import org.apache.flink.metrics.AbstractHistogramTest;
 import org.apache.flink.metrics.MetricConfig;
 import org.apache.flink.metrics.reporter.MetricReporter;
 import org.apache.flink.runtime.metrics.MetricRegistryConfiguration;
 import org.apache.flink.runtime.metrics.MetricRegistryImpl;
 import org.apache.flink.runtime.metrics.ReporterSetup;
 import org.apache.flink.runtime.metrics.groups.TaskManagerMetricGroup;
-import org.apache.flink.util.TestLogger;
 
 import com.codahale.metrics.Counter;
 import com.codahale.metrics.Gauge;
@@ -53,277 +53,273 @@ import java.util.concurrent.TimeoutException;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
-/**
- * Tests for the DropwizardFlinkHistogramWrapper.
- */
-public class DropwizardFlinkHistogramWrapperTest extends TestLogger {
+/** Tests for the DropwizardFlinkHistogramWrapper. */
+public class DropwizardFlinkHistogramWrapperTest extends AbstractHistogramTest {
 
-	/**
-	 * Tests the histogram functionality of the DropwizardHistogramWrapper.
-	 */
-	@Test
-	public void testDropwizardHistogramWrapper() {
-		int size = 10;
-		DropwizardHistogramWrapper histogramWrapper = new DropwizardHistogramWrapper(
-			new com.codahale.metrics.Histogram(new SlidingWindowReservoir(size)));
+    /** Tests the histogram functionality of the DropwizardHistogramWrapper. */
+    @Test
+    public void testDropwizardHistogramWrapper() {
+        int size = 10;
+        DropwizardHistogramWrapper histogramWrapper =
+                new DropwizardHistogramWrapper(
+                        new com.codahale.metrics.Histogram(new SlidingWindowReservoir(size)));
+        testHistogram(size, histogramWrapper);
+    }
 
-		for (int i = 0; i < size; i++) {
-			histogramWrapper.update(i);
+    /**
+     * Tests that the DropwizardHistogramWrapper reports correct dropwizard snapshots to the
+     * ScheduledReporter.
+     */
+    @Test
+    public void testDropwizardHistogramWrapperReporting() throws Exception {
+        long reportingInterval = 1000;
+        long timeout = 30000;
+        int size = 10;
+        String histogramMetricName = "histogram";
 
-			assertEquals(i + 1, histogramWrapper.getCount());
-			assertEquals(i, histogramWrapper.getStatistics().getMax());
-			assertEquals(0, histogramWrapper.getStatistics().getMin());
-		}
+        MetricConfig config = new MetricConfig();
+        config.setProperty(
+                ConfigConstants.METRICS_REPORTER_INTERVAL_SUFFIX,
+                reportingInterval + " MILLISECONDS");
 
-		assertEquals(size, histogramWrapper.getStatistics().size());
-		assertEquals((size - 1) / 2.0, histogramWrapper.getStatistics().getQuantile(0.5), 0.001);
+        MetricRegistryImpl registry = null;
 
-		for (int i = size; i < 2 * size; i++) {
-			histogramWrapper.update(i);
+        try {
+            registry =
+                    new MetricRegistryImpl(
+                            MetricRegistryConfiguration.defaultMetricRegistryConfiguration(),
+                            Collections.singletonList(
+                                    ReporterSetup.forReporter(
+                                            "test", config, new TestingReporter())));
+            DropwizardHistogramWrapper histogramWrapper =
+                    new DropwizardHistogramWrapper(
+                            new com.codahale.metrics.Histogram(new SlidingWindowReservoir(size)));
 
-			assertEquals(i + 1, histogramWrapper.getCount());
-			assertEquals(i, histogramWrapper.getStatistics().getMax());
-			assertEquals(i + 1 - size, histogramWrapper.getStatistics().getMin());
-		}
+            TaskManagerMetricGroup metricGroup =
+                    new TaskManagerMetricGroup(registry, "localhost", "tmId");
 
-		assertEquals(size, histogramWrapper.getStatistics().size());
-		assertEquals(size + (size - 1) / 2.0, histogramWrapper.getStatistics().getQuantile(0.5), 0.001);
-	}
+            metricGroup.histogram(histogramMetricName, histogramWrapper);
 
-	/**
-	 * Tests that the DropwizardHistogramWrapper reports correct dropwizard snapshots to the
-	 * ScheduledReporter.
-	 */
-	@Test
-	public void testDropwizardHistogramWrapperReporting() throws Exception {
-		long reportingInterval = 1000;
-		long timeout = 30000;
-		int size = 10;
-		String histogramMetricName = "histogram";
+            String fullMetricName = metricGroup.getMetricIdentifier(histogramMetricName);
 
-		MetricConfig config = new MetricConfig();
-		config.setProperty(ConfigConstants.METRICS_REPORTER_INTERVAL_SUFFIX, reportingInterval + " MILLISECONDS");
+            assertTrue(registry.getReporters().size() == 1);
 
-		MetricRegistryImpl registry = null;
+            MetricReporter reporter = registry.getReporters().get(0);
 
-		try {
-			registry = new MetricRegistryImpl(
-				MetricRegistryConfiguration.defaultMetricRegistryConfiguration(),
-				Collections.singletonList(ReporterSetup.forReporter("test", config, new TestingReporter())));
-			DropwizardHistogramWrapper histogramWrapper = new DropwizardHistogramWrapper(
-				new com.codahale.metrics.Histogram(new SlidingWindowReservoir(size)));
+            assertTrue(reporter instanceof TestingReporter);
 
-			TaskManagerMetricGroup metricGroup = new TaskManagerMetricGroup(registry, "localhost", "tmId");
+            TestingReporter testingReporter = (TestingReporter) reporter;
 
-			metricGroup.histogram(histogramMetricName, histogramWrapper);
+            TestingScheduledReporter scheduledReporter = testingReporter.scheduledReporter;
 
-			String fullMetricName = metricGroup.getMetricIdentifier(histogramMetricName);
+            // check that the metric has been registered
+            assertEquals(1, testingReporter.getMetrics().size());
 
-			assertTrue(registry.getReporters().size() == 1);
+            for (int i = 0; i < size; i++) {
+                histogramWrapper.update(i);
+            }
 
-			MetricReporter reporter = registry.getReporters().get(0);
+            Future<Snapshot> snapshotFuture =
+                    scheduledReporter.getNextHistogramSnapshot(fullMetricName);
 
-			assertTrue(reporter instanceof TestingReporter);
+            Snapshot snapshot = snapshotFuture.get(timeout, TimeUnit.MILLISECONDS);
 
-			TestingReporter testingReporter = (TestingReporter) reporter;
+            assertEquals(0, snapshot.getMin());
+            assertEquals((size - 1) / 2.0, snapshot.getMedian(), 0.001);
+            assertEquals(size - 1, snapshot.getMax());
+            assertEquals(size, snapshot.size());
 
-			TestingScheduledReporter scheduledReporter = testingReporter.scheduledReporter;
+            registry.unregister(histogramWrapper, "histogram", metricGroup);
 
-			// check that the metric has been registered
-			assertEquals(1, testingReporter.getMetrics().size());
+            // check that the metric has been de-registered
+            assertEquals(0, testingReporter.getMetrics().size());
+        } finally {
+            if (registry != null) {
+                registry.shutdown().get();
+            }
+        }
+    }
 
-			for (int i = 0; i < size; i++) {
-				histogramWrapper.update(i);
-			}
+    /** Test reporter. */
+    public static class TestingReporter extends ScheduledDropwizardReporter {
+        TestingScheduledReporter scheduledReporter = null;
 
-			Future<Snapshot> snapshotFuture = scheduledReporter.getNextHistogramSnapshot(fullMetricName);
+        @Override
+        public ScheduledReporter getReporter(MetricConfig config) {
+            scheduledReporter =
+                    new TestingScheduledReporter(
+                            registry,
+                            getClass().getName(),
+                            null,
+                            TimeUnit.MILLISECONDS,
+                            TimeUnit.MILLISECONDS);
 
-			Snapshot snapshot = snapshotFuture.get(timeout, TimeUnit.MILLISECONDS);
+            return scheduledReporter;
+        }
 
-			assertEquals(0, snapshot.getMin());
-			assertEquals((size - 1) / 2.0, snapshot.getMedian(), 0.001);
-			assertEquals(size - 1, snapshot.getMax());
-			assertEquals(size, snapshot.size());
+        public Map<String, com.codahale.metrics.Metric> getMetrics() {
+            return registry.getMetrics();
+        }
+    }
 
-			registry.unregister(histogramWrapper, "histogram", metricGroup);
+    static class TestingScheduledReporter extends ScheduledReporter {
 
-			// check that the metric has been de-registered
-			assertEquals(0, testingReporter.getMetrics().size());
-		} finally {
-			if (registry != null) {
-				registry.shutdown().get();
-			}
-		}
-	}
+        final Map<String, Snapshot> histogramSnapshots = new HashMap<>();
+        final Map<String, List<CompletableFuture<Snapshot>>> histogramSnapshotFutures =
+                new HashMap<>();
 
-	/**
-	 * Test reporter.
-	 */
-	public static class TestingReporter extends ScheduledDropwizardReporter {
-		TestingScheduledReporter scheduledReporter = null;
+        protected TestingScheduledReporter(
+                com.codahale.metrics.MetricRegistry registry,
+                String name,
+                MetricFilter filter,
+                TimeUnit rateUnit,
+                TimeUnit durationUnit) {
+            super(registry, name, filter, rateUnit, durationUnit);
+        }
 
-		@Override
-		public ScheduledReporter getReporter(MetricConfig config) {
-			scheduledReporter = new TestingScheduledReporter(
-				registry,
-				getClass().getName(),
-				null,
-				TimeUnit.MILLISECONDS,
-				TimeUnit.MILLISECONDS);
+        @Override
+        public void report(
+                SortedMap<String, Gauge> gauges,
+                SortedMap<String, Counter> counters,
+                SortedMap<String, com.codahale.metrics.Histogram> histograms,
+                SortedMap<String, Meter> meters,
+                SortedMap<String, Timer> timers) {
+            for (Map.Entry<String, com.codahale.metrics.Histogram> entry : histograms.entrySet()) {
+                reportHistogram(entry.getKey(), entry.getValue());
+            }
+        }
 
-			return scheduledReporter;
-		}
+        void reportHistogram(String name, com.codahale.metrics.Histogram histogram) {
+            histogramSnapshots.put(name, histogram.getSnapshot());
 
-		public Map<String, com.codahale.metrics.Metric> getMetrics() {
-			return registry.getMetrics();
-		}
-	}
+            synchronized (histogramSnapshotFutures) {
+                if (histogramSnapshotFutures.containsKey(name)) {
+                    List<CompletableFuture<Snapshot>> futures =
+                            histogramSnapshotFutures.remove(name);
 
-	static class TestingScheduledReporter extends ScheduledReporter {
+                    for (CompletableFuture<Snapshot> future : futures) {
+                        future.complete(histogram.getSnapshot());
+                    }
+                }
+            }
+        }
 
-		final Map<String, Snapshot> histogramSnapshots = new HashMap<>();
-		final Map<String, List<CompletableFuture<Snapshot>>> histogramSnapshotFutures = new HashMap<>();
+        Future<Snapshot> getNextHistogramSnapshot(String name) {
+            synchronized (histogramSnapshotFutures) {
+                List<CompletableFuture<Snapshot>> futures;
+                if (histogramSnapshotFutures.containsKey(name)) {
+                    futures = histogramSnapshotFutures.get(name);
+                } else {
+                    futures = new ArrayList<>();
+                    histogramSnapshotFutures.put(name, futures);
+                }
 
-		protected TestingScheduledReporter(com.codahale.metrics.MetricRegistry registry, String name, MetricFilter filter, TimeUnit rateUnit, TimeUnit durationUnit) {
-			super(registry, name, filter, rateUnit, durationUnit);
-		}
+                CompletableFuture<Snapshot> future = new CompletableFuture<>();
+                futures.add(future);
 
-		@Override
-		public void report(SortedMap<String, Gauge> gauges, SortedMap<String, Counter> counters, SortedMap<String, com.codahale.metrics.Histogram> histograms, SortedMap<String, Meter> meters, SortedMap<String, Timer> timers) {
-			for (Map.Entry<String, com.codahale.metrics.Histogram> entry: histograms.entrySet()) {
-				reportHistogram(entry.getKey(), entry.getValue());
-			}
-		}
+                return future;
+            }
+        }
+    }
 
-		void reportHistogram(String name, com.codahale.metrics.Histogram histogram) {
-			histogramSnapshots.put(name, histogram.getSnapshot());
+    static class CompletableFuture<T> implements Future<T> {
 
-			synchronized (histogramSnapshotFutures) {
-				if (histogramSnapshotFutures.containsKey(name)) {
-					List<CompletableFuture<Snapshot>> futures = histogramSnapshotFutures.remove(name);
+        private Exception exception = null;
+        private T value = null;
 
-					for (CompletableFuture<Snapshot> future: futures) {
-						future.complete(histogram.getSnapshot());
-					}
-				}
-			}
-		}
+        private Object lock = new Object();
 
-		Future<Snapshot> getNextHistogramSnapshot(String name) {
-			synchronized (histogramSnapshotFutures) {
-				List<CompletableFuture<Snapshot>> futures;
-				if (histogramSnapshotFutures.containsKey(name)) {
-					futures = histogramSnapshotFutures.get(name);
-				} else {
-					futures = new ArrayList<>();
-					histogramSnapshotFutures.put(name, futures);
-				}
+        @Override
+        public boolean cancel(boolean mayInterruptIfRunning) {
+            synchronized (lock) {
+                if (isDone()) {
+                    return false;
+                } else {
+                    exception = new CancellationException("Future was cancelled.");
 
-				CompletableFuture<Snapshot> future = new CompletableFuture<>();
-				futures.add(future);
+                    lock.notifyAll();
 
-				return future;
-			}
-		}
-	}
+                    return true;
+                }
+            }
+        }
 
-	static class CompletableFuture<T> implements Future<T> {
+        @Override
+        public boolean isCancelled() {
+            return exception instanceof CancellationException;
+        }
 
-		private Exception exception = null;
-		private T value = null;
+        @Override
+        public boolean isDone() {
+            return value != null || exception != null;
+        }
 
-		private Object lock = new Object();
+        @Override
+        public T get() throws InterruptedException, ExecutionException {
+            while (!isDone() && !isCancelled()) {
+                synchronized (lock) {
+                    lock.wait();
+                }
+            }
 
-		@Override
-		public boolean cancel(boolean mayInterruptIfRunning) {
-			synchronized (lock) {
-				if (isDone()) {
-					return false;
-				} else {
-					exception = new CancellationException("Future was cancelled.");
+            if (exception != null) {
+                throw new ExecutionException(exception);
+            } else if (value != null) {
+                return value;
+            } else {
+                throw new ExecutionException(new Exception("Future did not complete correctly."));
+            }
+        }
 
-					lock.notifyAll();
+        @Override
+        public T get(long timeout, TimeUnit unit)
+                throws InterruptedException, ExecutionException, TimeoutException {
+            long timeoutMs = unit.toMillis(timeout);
+            long timeoutEnd = timeoutMs + System.currentTimeMillis();
 
-					return true;
-				}
-			}
-		}
+            while (!isDone() && !isCancelled() && timeoutMs > 0) {
+                synchronized (lock) {
+                    lock.wait(unit.toMillis(timeoutMs));
+                }
 
-		@Override
-		public boolean isCancelled() {
-			return exception instanceof CancellationException;
-		}
+                timeoutMs = timeoutEnd - System.currentTimeMillis();
+            }
 
-		@Override
-		public boolean isDone() {
-			return value != null || exception != null;
-		}
+            if (exception != null) {
+                throw new ExecutionException(exception);
+            } else if (value != null) {
+                return value;
+            } else {
+                throw new ExecutionException(new Exception("Future did not complete correctly."));
+            }
+        }
 
-		@Override
-		public T get() throws InterruptedException, ExecutionException {
-			while (!isDone() && !isCancelled()) {
-				synchronized (lock) {
-					lock.wait();
-				}
-			}
+        public boolean complete(T value) {
+            synchronized (lock) {
+                if (!isDone()) {
+                    this.value = value;
 
-			if (exception != null) {
-				throw new ExecutionException(exception);
-			} else if (value != null) {
-				return value;
-			} else {
-				throw new ExecutionException(new Exception("Future did not complete correctly."));
-			}
-		}
+                    lock.notifyAll();
 
-		@Override
-		public T get(long timeout, TimeUnit unit) throws InterruptedException, ExecutionException, TimeoutException {
-			long timeoutMs = unit.toMillis(timeout);
-			long timeoutEnd = timeoutMs + System.currentTimeMillis();
+                    return true;
+                } else {
+                    return false;
+                }
+            }
+        }
 
-			while (!isDone() && !isCancelled() && timeoutMs > 0) {
-				synchronized (lock) {
-					lock.wait(unit.toMillis(timeoutMs));
-				}
+        public boolean fail(Exception exception) {
+            synchronized (lock) {
+                if (!isDone()) {
+                    this.exception = exception;
 
-				timeoutMs = timeoutEnd - System.currentTimeMillis();
-			}
+                    lock.notifyAll();
 
-			if (exception != null) {
-				throw new ExecutionException(exception);
-			} else if (value != null) {
-				return value;
-			} else {
-				throw new ExecutionException(new Exception("Future did not complete correctly."));
-			}
-		}
-
-		public boolean complete(T value) {
-			synchronized (lock) {
-				if (!isDone()) {
-					this.value = value;
-
-					lock.notifyAll();
-
-					return true;
-				} else {
-					return false;
-				}
-			}
-		}
-
-		public boolean fail(Exception exception) {
-			synchronized (lock) {
-				if (!isDone()) {
-					this.exception = exception;
-
-					lock.notifyAll();
-
-					return true;
-				} else {
-					return false;
-				}
-			}
-		}
-	}
+                    return true;
+                } else {
+                    return false;
+                }
+            }
+        }
+    }
 }
